@@ -443,17 +443,13 @@ with result_col:
             "torque": torque,
             "tool_wear": tool_wear
         }
-
         try:
-
             response = requests.post(
-                "http://127.0.0.1:8000/predict",
-                json=payload,
-                timeout=10
+                ...
             )
 
             if response.status_code == 200:
-
+                result = response.json()
                 result = response.json()
 
                 probability = result["failure_probability"]
