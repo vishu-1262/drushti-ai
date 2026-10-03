@@ -1,7 +1,15 @@
+from datetime import date
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from src.predict import predict_machine_failure
+from src.predict import MODEL_VALIDATION, predict_machine_failure
+from src.storage import (
+    get_machine_history,
+    get_maintenance_schedule,
+    save_maintenance_schedule,
+    save_prediction,
+)
 
 
 # ---------------------------------------------------------
@@ -20,6 +28,13 @@ app = FastAPI(
 # ---------------------------------------------------------
 
 class MachineInput(BaseModel):
+
+    machine_id: str = Field(
+        default="MACHINE-001",
+        min_length=1,
+        max_length=80,
+        description="ID used to keep this machine's reading history",
+    )
 
     machine_type: str = Field(
         ...,
@@ -57,6 +72,12 @@ class MachineInput(BaseModel):
     )
 
 
+class MaintenanceScheduleInput(BaseModel):
+
+    last_serviced_on: date
+    interval_days: int = Field(..., ge=1, le=3650)
+
+
 # ---------------------------------------------------------
 # ROOT ENDPOINT
 # ---------------------------------------------------------
@@ -81,6 +102,48 @@ def health_check():
         "status": "healthy",
         "model": "loaded"
     }
+
+
+@app.get("/model-info")
+def model_info():
+
+    return MODEL_VALIDATION
+
+
+@app.get("/machines/{machine_id}/history")
+def machine_history(machine_id: str):
+
+    try:
+        return get_machine_history(machine_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.get("/machines/{machine_id}/maintenance")
+def maintenance_schedule(machine_id: str):
+
+    try:
+        schedule = get_maintenance_schedule(machine_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    return schedule or {"configured": False, "machine_id": machine_id}
+
+
+@app.put("/machines/{machine_id}/maintenance")
+def update_maintenance_schedule(
+    machine_id: str,
+    schedule: MaintenanceScheduleInput,
+):
+
+    try:
+        return save_maintenance_schedule(
+            machine_id,
+            schedule.last_serviced_on,
+            schedule.interval_days,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 
 # ---------------------------------------------------------
@@ -108,6 +171,11 @@ def predict(data: MachineInput):
             tool_wear=data.tool_wear
         )
 
+        save_prediction(
+            data.machine_id,
+            data.model_dump(exclude={"machine_id"}),
+            result,
+        )
         return result
 
     except ValueError as error:

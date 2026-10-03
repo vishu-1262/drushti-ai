@@ -1,6 +1,20 @@
+from datetime import date
+from html import escape
+import os
+
 import streamlit as st
 import requests
 
+try:
+    configured_api_url = st.secrets.get("DRUSHTI_API_URL")
+except st.errors.StreamlitSecretNotFoundError:
+    configured_api_url = None
+
+API_URL = (
+    configured_api_url
+    or os.getenv("DRUSHTI_API_URL")
+    or "http://127.0.0.1:8000"
+).rstrip("/")
 
 # ---------------------------------------------------------
 # PAGE CONFIGURATION
@@ -296,15 +310,14 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown(
+    st.html(
         """
         <div style="color:#8EA6B9;font-size:13px;line-height:1.6;">
         <b>DRUSHTI AI</b> is an ML-powered predictive
         maintenance decision-support system designed
         to estimate machine failure risk.
         </div>
-        """,
-        unsafe_allow_html=True
+        """
     )
 
 
@@ -312,7 +325,7 @@ with st.sidebar:
 # HERO SECTION
 # ---------------------------------------------------------
 
-st.markdown("""
+st.html("""
 <div class="hero">
 
     <div class="status">● SYSTEM READY</div>
@@ -331,7 +344,7 @@ st.markdown("""
     </div>
 
 </div>
-""", unsafe_allow_html=True)
+""")
 
 
 # ---------------------------------------------------------
@@ -347,7 +360,7 @@ input_col, result_col = st.columns([1, 1], gap="large")
 
 with input_col:
 
-    st.markdown("""
+    st.html("""
     <div class="card">
 
         <div class="card-title">
@@ -359,7 +372,13 @@ with input_col:
         </div>
 
     </div>
-    """, unsafe_allow_html=True)
+    """)
+
+    machine_id = st.text_input(
+        "Machine ID",
+        value="MACHINE-001",
+        max_chars=80,
+    )
 
     machine_type = st.selectbox(
         "Machine Type",
@@ -411,6 +430,76 @@ with input_col:
         step=1.0
     )
 
+    with st.expander("Maintenance reminder"):
+        saved_schedule = None
+        if machine_id.strip():
+            try:
+                schedule_response = requests.get(
+                    f"{API_URL}/machines/{machine_id.strip()}/maintenance",
+                    timeout=5,
+                )
+                if schedule_response.ok:
+                    schedule_data = schedule_response.json()
+                    if schedule_data.get("configured") is not False:
+                        saved_schedule = schedule_data
+            except requests.RequestException:
+                pass
+
+        last_service_default = date.today()
+        interval_default = 90
+        if saved_schedule:
+            last_service_default = date.fromisoformat(
+                saved_schedule["last_serviced_on"]
+            )
+            interval_default = saved_schedule["interval_days"]
+
+        last_serviced_on = st.date_input(
+            "Last serviced",
+            value=last_service_default,
+            max_value=date.today(),
+        )
+        maintenance_interval = st.number_input(
+            "Remind me every (days)",
+            min_value=1,
+            max_value=3650,
+            value=interval_default,
+            step=1,
+        )
+
+        if st.button("Save reminder", key="save_maintenance"):
+            if not machine_id.strip():
+                st.error("Enter a machine ID before saving a reminder.")
+            else:
+                try:
+                    schedule_response = requests.put(
+                        f"{API_URL}/machines/{machine_id.strip()}/maintenance",
+                        json={
+                            "last_serviced_on": last_serviced_on.isoformat(),
+                            "interval_days": int(maintenance_interval),
+                        },
+                        timeout=10,
+                    )
+                    if schedule_response.ok:
+                        saved_schedule = schedule_response.json()
+                    else:
+                        st.error(schedule_response.json().get("detail", "Could not save reminder."))
+                except requests.RequestException:
+                    st.error("The prediction API is not running.")
+
+        if saved_schedule:
+            days_remaining = saved_schedule["days_remaining"]
+            due_date = saved_schedule["due_date"]
+            if days_remaining < 0:
+                st.error(f"Maintenance is overdue by {abs(days_remaining)} days (due {due_date}).")
+            elif days_remaining == 0:
+                st.warning("Maintenance is due today.")
+            elif days_remaining <= 7:
+                st.warning(f"Maintenance is due in {days_remaining} days ({due_date}).")
+            else:
+                st.success(f"Next maintenance is due {due_date}.")
+        else:
+            st.caption("Set a service date and interval to create a reminder for this machine.")
+
     analyze = st.button("🔍 ANALYZE MACHINE")
 
 
@@ -420,7 +509,7 @@ with input_col:
 
 with result_col:
 
-    st.markdown("""
+    st.html("""
     <div class="prediction-card">
 
         <div class="card-title">
@@ -431,11 +520,12 @@ with result_col:
             Based on the trained machine-learning model.
         </div>
 
-    """, unsafe_allow_html=True)
+    """)
 
-    if analyze:
+    if analyze and machine_id.strip():
 
         payload = {
+            "machine_id": machine_id.strip(),
             "machine_type": machine_type,
             "air_temperature": air_temperature,
             "process_temperature": process_temperature,
@@ -445,11 +535,12 @@ with result_col:
         }
         try:
             response = requests.post(
-                ...
+                f"{API_URL}/predict",
+                json=payload,
+                timeout=10
             )
 
             if response.status_code == 200:
-                result = response.json()
                 result = response.json()
 
                 probability = result["failure_probability"]
@@ -458,7 +549,7 @@ with result_col:
 
                 probability_percent = probability * 100
 
-                st.markdown(
+                st.html(
                     f"""
                     <div class="probability">
                         {probability_percent:.2f}%
@@ -467,9 +558,61 @@ with result_col:
                     <div class="probability-label">
                         Failure Probability
                     </div>
-                    """,
-                    unsafe_allow_html=True
+                    """
                 )
+
+                if result["input_supported"]:
+                    st.caption(
+                        "All readings are within the values seen in the "
+                        "training examples."
+                    )
+                else:
+                    unusual_readings = ", ".join(
+                        result["out_of_range_features"]
+                    )
+                    st.warning(
+                        "These readings are outside the values in the "
+                        f"training examples: {unusual_readings}. "
+                        "The prediction may be less reliable. Check the "
+                        "measurements before acting."
+                    )
+
+                if result["possible_failure_modes"]:
+                    with st.expander("Possible areas to inspect"):
+                        st.caption(
+                            "These are similar labeled failures from the "
+                            "example dataset, not a confirmed diagnosis."
+                        )
+                        for mode in result["possible_failure_modes"]:
+                            st.write(
+                                f"**{mode['name']}** appeared in "
+                                f"{mode['similar_examples']} of "
+                                f"{mode['examples_checked']} nearby examples."
+                            )
+
+                validation = result["model_validation"]
+                with st.expander("How much should I trust this estimate?"):
+                    st.write(
+                        f"On {validation['test_examples']:,} held-back "
+                        f"{validation['dataset']} examples, the model found "
+                        f"{validation['detected_failures']} of "
+                        f"{validation['test_failures']} failures and missed "
+                        f"{validation['missed_failures']}. It also raised "
+                        f"{validation['false_alarms']} false alarms."
+                    )
+                    st.caption(
+                        f"That is {validation['recall_percent']}% of failures "
+                        f"caught and {validation['precision_percent']}% "
+                        "precision on benchmark data. This has not been "
+                        "validated against your factory's machines."
+                    )
+                    st.caption(
+                        "Score bands: Low below 5%, Medium 5% to below 50%, "
+                        "High 50% or above. In that test, observed failure "
+                        f"rates were {validation['risk_bands']['low']['observed_failure_percent']}% "
+                        f"Low, {validation['risk_bands']['medium']['observed_failure_percent']}% "
+                        f"Medium, and {validation['risk_bands']['high']['observed_failure_percent']}% High."
+                    )
 
                 if risk_level == "Low Risk":
 
@@ -504,7 +647,7 @@ with result_col:
                         "Prioritize inspection and consider maintenance action."
                     )
 
-                st.markdown(
+                st.html(
                     f"""
                     <div style="margin-top:20px;line-height:2;">
 
@@ -529,8 +672,7 @@ with result_col:
                         </div>
 
                     </div>
-                    """,
-                    unsafe_allow_html=True
+                    """
                 )
 
             else:
@@ -552,13 +694,55 @@ with result_col:
 
     else:
 
-        st.info(
-            "Enter machine operating conditions and click "
-            "**Analyze Machine** to generate a prediction."
+        if analyze and not machine_id.strip():
+            st.error("Enter a machine ID before analyzing the machine.")
+        else:
+            st.info(
+                "Enter machine operating conditions and click "
+                "**Analyze Machine** to generate a prediction."
+            )
+
+
+if machine_id.strip():
+    st.markdown("## Recent readings")
+    st.caption(f"Saved readings for {machine_id.strip()}")
+    try:
+        history_response = requests.get(
+            f"{API_URL}/machines/{machine_id.strip()}/history",
+            timeout=5,
         )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
+        if history_response.ok:
+            machine_history = history_response.json()
+            if machine_history:
+                history_rows = "".join(
+                    "<tr>"
+                    f"<td>{escape(item['recorded_at'].replace('T', ' ')[:19])}</td>"
+                    f"<td>{escape(item['machine_type'])}</td>"
+                    f"<td>{item['air_temperature']:.1f} K</td>"
+                    f"<td>{item['process_temperature']:.1f} K</td>"
+                    f"<td>{item['rotational_speed']:.0f} rpm</td>"
+                    f"<td>{item['torque']:.1f} Nm</td>"
+                    f"<td>{item['tool_wear']:.0f} min</td>"
+                    f"<td>{item['failure_probability']:.2%}</td>"
+                    f"<td>{escape(item['risk_level'])}</td>"
+                    "</tr>"
+                    for item in machine_history
+                )
+                st.html(
+                    "<div style='overflow-x:auto'><table "
+                    "style='width:100%;border-collapse:collapse;white-space:nowrap'>"
+                    "<thead><tr>"
+                    "<th>Recorded</th><th>Type</th><th>Air</th>"
+                    "<th>Process</th><th>Speed</th><th>Torque</th>"
+                    "<th>Tool wear</th><th>Failure estimate</th><th>Risk</th>"
+                    f"</tr></thead><tbody>{history_rows}</tbody></table></div>"
+                )
+            else:
+                st.caption("No readings saved for this machine yet.")
+        else:
+            st.caption("Reading history is currently unavailable.")
+    except requests.RequestException:
+        st.caption("Start the prediction API to view saved machine readings.")
 
 # ---------------------------------------------------------
 # WORKFLOW
@@ -566,7 +750,7 @@ with result_col:
 
 st.markdown("##")
 
-st.markdown("""
+st.html("""
 <div class="workflow">
 
     <div class="card-title">
@@ -578,7 +762,7 @@ st.markdown("""
     </div>
 
 </div>
-""", unsafe_allow_html=True)
+""")
 
 
 w1, w2, w3, w4 = st.columns(4)
@@ -614,7 +798,7 @@ for column, number, title, description in workflow:
 
     with column:
 
-        st.markdown(
+        st.html(
             f"""
             <div class="workflow-step">
 
@@ -631,8 +815,7 @@ for column, number, title, description in workflow:
                 </div>
 
             </div>
-            """,
-            unsafe_allow_html=True
+            """
         )
 
 
@@ -647,7 +830,7 @@ feature_col, about_col = st.columns(2, gap="large")
 
 with feature_col:
 
-    st.markdown("""
+    st.html("""
     <div class="card">
 
         <div class="card-title">
@@ -675,12 +858,12 @@ with feature_col:
         </div>
 
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 with about_col:
 
-    st.markdown("""
+    st.html("""
     <div class="card">
 
         <div class="card-title">
@@ -707,14 +890,14 @@ with about_col:
         </div>
 
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # ---------------------------------------------------------
 # FOOTER
 # ---------------------------------------------------------
 
-st.markdown("""
+st.html("""
 <div style="
     text-align:center;
     color:#60798D;
@@ -725,4 +908,4 @@ st.markdown("""
     <br>
     ML-powered predictive maintenance decision support
 </div>
-""", unsafe_allow_html=True)
+""")
